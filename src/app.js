@@ -65,12 +65,49 @@ function validateContact(body = {}) {
   };
 }
 
-function createTransporter() {
+async function createTransporter() {
   const required = ["SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASS", "COMPANY_EMAIL"];
   const missing = required.filter((key) => !process.env[key]);
 
   if (missing.length) {
     throw new Error(`Missing SMTP environment variables: ${missing.join(", ")}`);
+  }
+
+  // Helpful validation for common placeholder values
+  const host = String(process.env.SMTP_HOST || "").trim();
+  if (!host || host.includes("example")) {
+    if (String(process.env.NODE_ENV || "").toLowerCase() === "production") {
+      throw new Error(
+        `SMTP_HOST appears to be a placeholder (${host}). Please set a real SMTP host in your .env for production.`
+      );
+    }
+
+    // Development fallback: create an Ethereal test account automatically.
+    // This avoids failing during local testing when the user hasn't configured SMTP yet.
+    console.warn(
+      `SMTP_HOST looks like a placeholder (${host}). Creating an Ethereal test account for local testing.`
+    );
+
+    const testAccount = await nodemailer.createTestAccount();
+
+    return nodemailer.createTransport({
+      host: "smtp.ethereal.email",
+      port: 587,
+      secure: false,
+      auth: {
+        user: testAccount.user,
+        pass: testAccount.pass
+      }
+    });
+  }
+
+  // Allow local/dev SMTP servers like MailHog without auth
+  if (host === "localhost" || host.includes("mailhog")) {
+    return nodemailer.createTransport({
+      host: process.env.SMTP_HOST,
+      port: Number(process.env.SMTP_PORT) || 1025,
+      secure: false
+    });
   }
 
   return nodemailer.createTransport({
@@ -85,9 +122,9 @@ function createTransporter() {
 }
 
 async function sendCompanyEmail(enquiry) {
-  const transporter = createTransporter();
+  const transporter = await createTransporter();
 
-  return transporter.sendMail({
+  const info = await transporter.sendMail({
     from: `"Website Contact Form" <${process.env.SMTP_USER}>`,
     to: process.env.COMPANY_EMAIL,
     replyTo: enquiry.email,
@@ -103,19 +140,36 @@ async function sendCompanyEmail(enquiry) {
       `Received: ${enquiry.createdAt}`
     ].join("\n")
   });
+
+  // If using Ethereal, log the preview URL for convenience
+  try {
+    const preview = nodemailer.getTestMessageUrl(info);
+    if (preview) console.info("Preview email:", preview);
+  } catch (e) {
+    // ignore
+  }
+
+  return info;
 }
 
 async function sendAutoReply(enquiry) {
   if (String(process.env.SEND_AUTO_REPLY).toLowerCase() !== "true") return;
 
-  const transporter = createTransporter();
+  const transporter = await createTransporter();
 
-  await transporter.sendMail({
+  const info = await transporter.sendMail({
     from: `"Company Contact" <${process.env.SMTP_USER}>`,
     to: enquiry.email,
     subject: "We received your enquiry",
     text: `Hi ${enquiry.name},\n\nThanks for contacting us. We received your message and will get back to you soon.\n\nRegards,\nCompany Team`
   });
+
+  try {
+    const preview = nodemailer.getTestMessageUrl(info);
+    if (preview) console.info("Preview auto-reply:", preview);
+  } catch (e) {
+    // ignore
+  }
 }
 
 // Health endpoint
